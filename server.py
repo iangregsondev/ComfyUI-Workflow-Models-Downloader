@@ -1155,6 +1155,43 @@ def lookup_civitai_by_hash(file_hash):
         return None
 
 
+def resolve_download_dir(target_dir):
+    """Resolve the directory to download a model into, honoring extra_model_paths.yaml.
+
+    Uses ComfyUI's registered folder paths (get_folder_paths) - which include any
+    locations added by extra_model_paths.yaml - instead of hardcoding the base
+    ComfyUI models dir. The first registered path is ComfyUI's default target;
+    set `is_default: true` for a location in extra_model_paths.yaml to make it the
+    default download destination.
+    """
+    norm = target_dir.replace('\\', '/').strip('/')
+    parts = [p for p in norm.split('/') if p]
+    if not parts:
+        return folder_paths.models_dir
+
+    category, sub = parts[0], parts[1:]
+    try:
+        all_paths = folder_paths.get_folder_paths(category)
+    except Exception:
+        all_paths = []
+
+    base = None
+    if all_paths:
+        # Prefer a registered path whose final segment matches the requested
+        # category (e.g. ".../models/diffusion_models" over ".../models/unet"),
+        # otherwise use the first (default) registered path.
+        for p in all_paths:
+            if os.path.basename(os.path.normpath(p)).lower() == category.lower():
+                base = p
+                break
+        if base is None:
+            base = all_paths[0]
+    if base is None:
+        base = os.path.join(folder_paths.models_dir, category)
+
+    return os.path.join(base, *sub) if sub else base
+
+
 def find_model_file_path(target_dir, filename):
     """Find the full path to a model file, checking all configured model paths including extra_model_paths.yaml"""
 
@@ -2975,9 +3012,8 @@ def _download_model_thread(download_id, hf_repo, hf_path, filename, target_dir):
     try:
         from huggingface_hub import hf_hub_download
 
-        # Normalize path separators for the OS
-        target_dir_normalized = target_dir.replace('/', os.sep).replace('\\', os.sep)
-        target_path = os.path.join(folder_paths.models_dir, target_dir_normalized)
+        # Resolve target dir via ComfyUI's folder paths (honors extra_model_paths.yaml)
+        target_path = resolve_download_dir(target_dir)
 
         # Create directory if it doesn't exist
         try:
@@ -3130,9 +3166,8 @@ def _download_model_thread(download_id, hf_repo, hf_path, filename, target_dir):
 def _download_from_url_thread(download_id, url, filename, target_dir):
     """Background thread to download a model from direct URL"""
     try:
-        # Normalize path separators for the OS
-        target_dir_normalized = target_dir.replace('/', os.sep).replace('\\', os.sep)
-        target_path = os.path.join(folder_paths.models_dir, target_dir_normalized)
+        # Resolve target dir via ComfyUI's folder paths (honors extra_model_paths.yaml)
+        target_path = resolve_download_dir(target_dir)
 
         # Create directory if it doesn't exist
         try:
@@ -5122,9 +5157,8 @@ async def queue_download_endpoint(request):
             if hf_token:
                 headers['Authorization'] = f'Bearer {hf_token}'
 
-        # Normalize path
-        target_dir_normalized = target_dir.replace('/', os.sep).replace('\\', os.sep)
-        dest_path = os.path.join(folder_paths.models_dir, target_dir_normalized, filename)
+        # Resolve target dir via ComfyUI's folder paths (honors extra_model_paths.yaml)
+        dest_path = os.path.join(resolve_download_dir(target_dir), filename)
 
         # Create directory
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
