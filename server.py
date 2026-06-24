@@ -1062,6 +1062,32 @@ URL_DIRECTORY_HINTS = {
     '/pulid/': 'pulid',
 }
 
+# Loader node class -> destination directory.
+# A node's class is a far stronger signal than its filename: a UNETLoader always
+# loads from diffusion_models, a VAELoader from vae, etc. This is used as a high
+# priority directory source so models with no filename pattern (e.g. Z-Image)
+# are placed correctly instead of falling through to the 'checkpoints' default.
+LOADER_NODE_DIRECTORY = {
+    'UNETLoader': 'diffusion_models',
+    'CheckpointLoaderSimple': 'checkpoints',
+    'CheckpointLoader': 'checkpoints',
+    'unCLIPCheckpointLoader': 'checkpoints',
+    'ImageOnlyCheckpointLoader': 'checkpoints',
+    'VAELoader': 'vae',
+    'CLIPLoader': 'text_encoders',
+    'DualCLIPLoader': 'text_encoders',
+    'TripleCLIPLoader': 'text_encoders',
+    'QuadrupleCLIPLoader': 'text_encoders',
+    'CLIPVisionLoader': 'clip_vision',
+    'ControlNetLoader': 'controlnet',
+    'DiffControlNetLoader': 'controlnet',
+    'LoraLoader': 'loras',
+    'LoraLoaderModelOnly': 'loras',
+    'StyleModelLoader': 'style_models',
+    'GLIGENLoader': 'gligen',
+    'UpscaleModelLoader': 'upscale_models',
+}
+
 
 def identify_model_type_from_filename(model_name):
     """Identify model type from filename patterns"""
@@ -1519,6 +1545,16 @@ def scan_workflow_for_models(workflow_json):
             model_files.add(model_name)
             model_name_map[model_name] = model_name
 
+    # Basenames already referenced by real loader nodes (properties/widgets).
+    # The regex pass below also scans markdown notes, which commonly repeat the
+    # same file by its bare name (no subfolder). Without this guard a note's
+    # "model.safetensors" and a loader's "subdir/model.safetensors" are treated
+    # as two different models and downloaded twice. Dedupe by basename so the
+    # authoritative loader reference (which carries the correct subfolder) wins.
+    known_basenames = {
+        os.path.basename(name.replace('\\', '/')) for name in node_models
+    }
+
     for model in model_files_raw:
         cleaned = model.strip()
         if cleaned and cleaned[0].isalnum():
@@ -1529,6 +1565,10 @@ def scan_workflow_for_models(workflow_json):
                     decoded = urllib.parse.unquote(cleaned)
                 except Exception:
                     decoded = cleaned
+
+                # Skip note/text references already covered by a loader node
+                if os.path.basename(decoded.replace('\\', '/')) in known_basenames:
+                    continue
 
                 model_files.add(decoded)
                 model_name_map[decoded] = cleaned  # Keep original for URL matching
@@ -1554,6 +1594,10 @@ def scan_workflow_for_models(workflow_json):
 
         original_name = model_name_map.get(model, model)
 
+        # Basename (a loader value may carry a subfolder, e.g. "z-image\\x.safetensors"),
+        # while the download URL only ever contains the bare filename.
+        model_basename = os.path.basename(model.replace('\\', '/'))
+
         for url in cleaned_urls:
             # Check decoded name in URL
             if model in url:
@@ -1561,6 +1605,13 @@ def scan_workflow_for_models(workflow_json):
                 break
             # Check original (possibly URL-encoded) name in URL
             if original_name in url:
+                model_url_map[model] = url
+                break
+            # Check bare basename (handles subfoldered loader values)
+            if model_basename != model and (
+                model_basename in url
+                or urllib.parse.quote(model_basename, safe='') in url
+            ):
                 model_url_map[model] = url
                 break
             # Check URL-encoded version of decoded name
@@ -1592,7 +1643,14 @@ def scan_workflow_for_models(workflow_json):
         if from_node_properties and node_models[model].get('directory'):
             target_dir = node_models[model]['directory']
 
-        # Second priority: Check URL for directory hints
+        # Second priority: infer the directory from the loader node's class.
+        # More reliable than guessing from the filename, and fixes models with
+        # no filename pattern (e.g. Z-Image) that would otherwise default to
+        # 'checkpoints'.
+        elif from_node_properties and node_models[model].get('node_type') in LOADER_NODE_DIRECTORY:
+            target_dir = LOADER_NODE_DIRECTORY[node_models[model]['node_type']]
+
+        # Third priority: Check URL for directory hints
         elif url:
             url_lower = url.lower()
             for url_path, directory in URL_DIRECTORY_HINTS.items():
